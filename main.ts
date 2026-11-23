@@ -5,31 +5,35 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-// Per-opcode [immediate bytes, pops, pushes]; a missing entry is trap 5.
-const T = {};
-T[0x00] = [0, 0, 0];
-T[0x01] = [1, 0, 1];
-T[0x02] = [4, 0, 1];
-T[0x03] = [0, 1, 0];
-T[0x04] = [0, 1, 2];
-T[0x05] = [0, 2, 2];
-T[0x06] = [0, 2, 3];
-T[0x07] = [0, 3, 3];
+// Per-opcode immediate bytes / pops / pushes in flat typed arrays, so the
+// hot loop reads three bytes instead of dereferencing an object entry and
+// its array on every step. HAS[op] === 0 is an unknown opcode (trap 5).
+const IMM = new Uint8Array(256), POP = new Uint8Array(256);
+const PSH = new Uint8Array(256), HAS = new Uint8Array(256);
+const def = (op, i, p, s) => { HAS[op] = 1; IMM[op] = i; POP[op] = p; PSH[op] = s; };
+def(0x00, 0, 0, 0);
+def(0x01, 1, 0, 1);
+def(0x02, 4, 0, 1);
+def(0x03, 0, 1, 0);
+def(0x04, 0, 1, 2);
+def(0x05, 0, 2, 2);
+def(0x06, 0, 2, 3);
+def(0x07, 0, 3, 3);
 for (let o = 0x10; o <= 0x22; o++) {
-  if (o === 0x17 || o === 0x1b) T[o] = [0, 1, 1];
-  else if (o <= 0x1e || o >= 0x20) T[o] = [0, 2, 1];
+  if (o === 0x17 || o === 0x1b) def(o, 0, 1, 1);
+  else if (o <= 0x1e || o >= 0x20) def(o, 0, 2, 1);
 }
-T[0x30] = [2, 0, 0];
-T[0x31] = [2, 1, 0];
-T[0x32] = [2, 1, 0];
-T[0x33] = [2, 0, 0];
-T[0x34] = [0, 0, 0];
-T[0x40] = [0, 1, 1];
-T[0x41] = [0, 2, 0];
-T[0x50] = [0, 1, 0];
-T[0x51] = [0, 1, 0];
-T[0x52] = [0, 0, 1];
-T[0x53] = [0, 1, 0];
+def(0x30, 2, 0, 0);
+def(0x31, 2, 1, 0);
+def(0x32, 2, 1, 0);
+def(0x33, 2, 0, 0);
+def(0x34, 0, 0, 0);
+def(0x40, 0, 1, 1);
+def(0x41, 0, 2, 0);
+def(0x50, 0, 1, 0);
+def(0x51, 0, 1, 0);
+def(0x52, 0, 0, 1);
+def(0x53, 0, 1, 0);
 
 function run(p, inp) {
   const n = p.length;
@@ -45,13 +49,12 @@ function run(p, inp) {
     if (steps === 1000000) return done(10);
     if (pc < 0 || pc >= n) return done(9);
     const op = p[pc];
-    const t = T[op];
-    if (t === undefined) return done(5);
-    const imm = t[0];
+    if (!HAS[op]) return done(5);
+    const imm = IMM[op];
     if (pc + imm >= n) return done(9);
     steps++;
-    if (sp < t[1]) return done(2);
-    if (sp - t[1] + t[2] > 256) return done(3);
+    if (sp < POP[op]) return done(2);
+    if (sp - POP[op] + PSH[op] > 256) return done(3);
     const next = pc + 1 + imm;
     pc = next;
     switch (op) {
@@ -125,7 +128,9 @@ function run(p, inp) {
         else if (op === 0x20) r = a === b ? 1 : 0;
         else if (op === 0x21) r = a < b ? 1 : 0;
         else r = (a >>> 0) < (b >>> 0) ? 1 : 0; // 0x22 LTU
-        sp -= 2; D[sp++] = r;
+        // Net stack effect is -1: overwrite a's slot in place instead of
+        // adjusting sp twice (sp -= 2; D[sp++] = r).
+        D[sp - 2] = r; sp--;
       }
     }
   }
